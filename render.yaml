@@ -1,0 +1,16 @@
+# Render Blueprint for the Spotter take-home Django API.
+# Deploy via Render dashboard: New -> Blueprint -> connect repo KmSasikumar/spotter-truck-routing.
+# The app is stateless (no DB models, no migrations): it only proxies keyless
+# public APIs (Nominatim / OSRM / Open-Meteo) server-side.
+services:
+  - type: web
+    name: spotter-truck-routing-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: gunicorn config.wsgi:application --chdir backend --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.4
+      - key: DJANGO_DEBUG
+        value: "False"
