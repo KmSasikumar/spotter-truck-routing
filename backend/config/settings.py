@@ -17,6 +17,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    "routes.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
 ]
 
