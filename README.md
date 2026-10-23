@@ -3,6 +3,10 @@
 A React + Django web app that helps a truck driver pick the **safest route** based on
 weather, load weight and travel time. (Spotter Labs Full Stack Developer take-home.)
 
+## Live demo
+- Frontend: https://lead-management.antideploy.app
+- Backend API: https://spotter-truck-routing-api-b6ve.onrender.com
+
 ## Setup
 
 **Backend (Django, Python 3.12):**
