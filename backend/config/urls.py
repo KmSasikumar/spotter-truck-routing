@@ -1,1 +1,5 @@
-from django.urls import include, pathurlpatterns = [    path("api/", include("routes.urls")),]
+from django.urls import include, path
+
+urlpatterns = [
+  path("api/", include("routes.urls")),
+]
