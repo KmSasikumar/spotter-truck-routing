@@ -1,0 +1,1 @@
+Django>=4.2,<5.0requests>=2.31gunicorn>=21.2,<23
