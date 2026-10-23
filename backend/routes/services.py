@@ -63,18 +63,18 @@ def classify_checkpoint(
     # Load rules (only escalate).
     if wind_mph >= 55:
         if level != "no_travel":
-            reasons.append(f"Wind {wind_mph:.0f} mph \u2265 55 \u2192 No Travel for any load")
+            reasons.append(f"Wind {wind_mph:.0f} mph ≥ 55 → No Travel for any load")
         level = "no_travel"
     elif 45 <= wind_mph <= 54 and load_lb > 30_000:
         if level != "no_travel":
             reasons.append(
-                f"Wind {wind_mph:.0f} mph (45\u201354) + load {load_lb:,.0f} lb > 30,000 lb \u2192 No Travel"
+                f"Wind {wind_mph:.0f} mph (45–54) + load {load_lb:,.0f} lb > 30,000 lb → No Travel"
             )
         level = "no_travel"
     elif 35 <= wind_mph <= 44 and load_lb > 40_000:
         if SCORE[level] < SCORE["severe"]:
             reasons.append(
-                f"Wind {wind_mph:.0f} mph (35\u201344) + load {load_lb:,.0f} lb > 40,000 lb \u2192 Severe"
+                f"Wind {wind_mph:.0f} mph (35–44) + load {load_lb:,.0f} lb > 40,000 lb → Severe"
             )
             level = "severe"
 
