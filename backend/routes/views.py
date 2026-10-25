@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -70,32 +71,84 @@ def _osrm_routes(o_lat, o_lon, d_lat, d_lon):
     return data.get("routes", [])
 
 
-def _openmeteo_forecast(lats: list[float], lons: list[float]):
+# Small in-process cache: a repeated plan (same points + window) should
+# not hit Open-Meteo again. Forecast data changes slowly, so 30 minutes
+# is safe, and it stops a retry loop from re-triggering the rate limit.
+_FORECAST_CACHE: dict = {}
+_FORECAST_TTL_S = 1800
+
+
+def _openmeteo_forecast(lats: list[float], lons: list[float], start_date=None, end_date=None):
     """Batch forecast for many points; returns list of hourly dicts aligned
-    with the input points."""
-    resp = requests.get(
-        OPENMETEO_URL,
-        params={
-            "latitude": ",".join(f"{v:.5f}" for v in lats),
-            "longitude": ",".join(f"{v:.5f}" for v in lons),
-            "hourly": "wind_speed_10m,precipitation,snowfall",
-            "wind_speed_unit": "mph",
-            "precipitation_unit": "inch",
-            "timezone": "auto",
-            "forecast_days": 16,
-        },
-        timeout=REQ_TIMEOUT,
+    with the input points.
+
+    Rate-limit fix (was: forecast_days=16 for every route, three times
+    per plan, with no retry):
+    - Request only the days actually needed around the departure/ETA
+      window instead of 16 days of hourly data per point. That cuts
+      each request to roughly an eighth of its old size.
+    - Cache a successful batch for 30 minutes, keyed by points + window.
+    - On HTTP 429, respect Retry-After, otherwise back off before
+      retrying, and never surface the raw request URL in an error.
+    """
+    cache_key = (
+        tuple(f"{v:.5f}" for v in lats),
+        tuple(f"{v:.5f}" for v in lons),
+        start_date,
+        end_date,
     )
-    resp.raise_for_status()
+    cached = _FORECAST_CACHE.get(cache_key)
+    if cached and time.monotonic() - cached[0] < _FORECAST_TTL_S:
+        return cached[1]
+
+    params = {
+        "latitude": ",".join(f"{v:.5f}" for v in lats),
+        "longitude": ",".join(f"{v:.5f}" for v in lons),
+        "hourly": "wind_speed_10m,precipitation,snowfall",
+        "wind_speed_unit": "mph",
+        "precipitation_unit": "inch",
+        "timezone": "auto",
+    }
+    if start_date and end_date:
+        params["start_date"] = start_date
+        params["end_date"] = end_date
+    else:
+        params["forecast_days"] = 3
+
+    last_exc = None
+    for attempt in range(4):
+        try:
+            resp = requests.get(OPENMETEO_URL, params=params, timeout=REQ_TIMEOUT)
+            resp.raise_for_status()
+            break
+        except requests.HTTPError as exc:
+            last_exc = exc
+            status = exc.response.status_code if exc.response is not None else None
+            if status != 429 or attempt == 3:
+                break
+            retry_after = None
+            try:
+                retry_after = float(exc.response.headers.get("Retry-After", ""))
+            except (TypeError, ValueError):
+                retry_after = None
+            time.sleep(retry_after if retry_after else (2, 5, 10)[attempt])
+    else:
+        raise RuntimeError("Weather service is rate-limited. Please wait a minute and try again.")
+    if last_exc is not None:
+        status = last_exc.response.status_code if last_exc.response is not None else None
+        if status == 429:
+            raise RuntimeError("Weather service is rate-limited. Please wait a minute and try again.")
+        raise RuntimeError(f"Weather service returned HTTP {status}." if status else "Weather service unavailable.")
     data = resp.json()
     # Single location -> {"hourly": {...}}; multiple locations -> top-level
     # list of per-location objects, each with its own "hourly" dict.
     if isinstance(data, list):
-        return [loc["hourly"] for loc in data]
-    hourly = data.get("hourly")
-    if isinstance(hourly, dict):
-        return [hourly]
-    return hourly
+        result = [loc["hourly"] for loc in data]
+    else:
+        hourly = data.get("hourly")
+        result = [hourly] if isinstance(hourly, dict) else hourly
+    _FORECAST_CACHE[cache_key] = (time.monotonic(), result)
+    return result
 
 
 def _weather_at(hourly: dict, when: datetime):
@@ -227,7 +280,10 @@ def plan(request):
         positions = _checkpoint_positions(geometry, spacing)
         try:
             forecasts = _openmeteo_forecast(
-                [p[0] for p in positions], [p[1] for p in positions]
+                [p[0] for p in positions],
+                [p[1] for p in positions],
+                start_date=(departure - timedelta(days=1)).date().isoformat(),
+                end_date=(departure + timedelta(days=2)).date().isoformat(),
             )
         except Exception as exc:  # noqa: BLE001
             return _err(f"Weather service unavailable: {exc}", 502)
@@ -316,7 +372,10 @@ def heatmap(request):
     when = departure + timedelta(hours=hour_offset)
     try:
         forecasts = _openmeteo_forecast(
-            [float(p[0]) for p in points], [float(p[1]) for p in points]
+            [float(p[0]) for p in points],
+            [float(p[1]) for p in points],
+            start_date=(when - timedelta(days=1)).date().isoformat(),
+            end_date=(when + timedelta(days=1)).date().isoformat(),
         )
     except Exception as exc:  # noqa: BLE001
         return _err(f"Weather service unavailable: {exc}", 502)
