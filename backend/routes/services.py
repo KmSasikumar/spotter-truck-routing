@@ -95,7 +95,9 @@ def summarize_route(checkpoints: list[dict]) -> dict:
     total = 0.0
     worst = 0
     for a, b in zip(checkpoints, checkpoints[1:]):
-        seg = haversine_miles(a["lat"], a["lon"], b["lat"], b["lon"])
+        # Path miles along the route (not straight-line chords), so the
+        # per-level miles sum to the route length.
+        seg = b["miles_along"] - a["miles_along"]
         score = SCORE[a["risk"]]
         miles_per_level[a["risk"]] += seg
         weighted += score * seg

@@ -6,6 +6,8 @@ weather, load weight and travel time. (Spotter Labs Full Stack Developer take-ho
 ## Live demo
 - Frontend: https://spotter-truck-routing.antideploy.app
 - Backend API: https://spotter-truck-routing-api-b6ve.onrender.com
+- Walkthrough video (captioned screen capture, no voice): `demo/spotter-walkthrough.mp4`
+  — https://github.com/KmSasikumar/spotter-truck-routing/blob/main/demo/spotter-walkthrough.mp4
 
 ## Setup
 
@@ -56,10 +58,16 @@ backend/   Django (plain JSON views, no DB models needed)
 - **Routing:** OSRM public server `router.project-osrm.org` with `alternatives=3`,
   `overview=full`, `geometries=geojson`. If it returns fewer than 3 routes we plan
   with what we got and say so in `notes` (verified: Dallas→Houston returns 1).
-- **Weather:** Open-Meteo `api.open-meteo.com/v1/forecast`, hourly
-  `wind_speed_10m` (mph), `precipitation` (inch), `snowfall` (cm → ÷2.54 = in/hr).
-  One batched request per route for all its checkpoints (multi-coordinate support);
-  heatmap batches all corridor points in one request too.
+- **Weather (primary):** National Weather Service gridpoint API (`api.weather.gov`) —
+  wind (km/h → mph), quantitative precipitation (mm → in/hr) and snowfall
+  (mm → in/hr), expanded from interval values to hourly rates. US-only, which
+  fits this US trucking app. One point lookup + one grid request per grid cell,
+  with a 30-minute in-process forecast cache.
+- **Weather (fallback):** Open-Meteo `api.open-meteo.com/v1/forecast`, hourly
+  `wind_speed_10m` (mph), `precipitation` (inch), `snowfall` (cm → ÷2.54 = in/hr),
+  used only if NWS fails for a point (e.g. a non-US location). One batched
+  request per route for all its checkpoints (multi-coordinate support);
+  heatmap batches all corridor points in one request too, with 429 retry + backoff.
 
 ## Risk & recommendation logic (`routes/services.py`)
 
@@ -81,18 +89,21 @@ Recommendation order: ① fewest **no-travel** miles (treated worse than severe)
 - Checkpoint ETA = departure + (miles_along / route_miles) × route duration —
   i.e. uniform average speed along the route.
 - Each segment between two checkpoints takes its **starting** checkpoint's risk level;
-  miles-per-level are summed segment lengths (haversine).
-- The forecast hour nearest each checkpoint ETA is used; ETAs beyond the 16-day
+  miles-per-level are summed path miles between checkpoints (miles_along differences).
+- The forecast hour nearest each checkpoint ETA is used; ETAs beyond the
   forecast window clamp to the nearest available hour.
 - Weather is sampled at exact spacing intervals plus the destination point.
 
-## Verification (2026-10-23, local)
+## Verification (2026-10-26, local backend + live OSRM / NWS / Nominatim)
 - `manage.py check` — no issues. `npm run build` — passes.
-- Live end-to-end: `POST /api/plan` Dallas, TX → Houston, TX (departure next day
-  08:00, 40,000 lb, 25-mi spacing) → HTTP 200, 1 route (OSRM returned 1; noted),
-  238.4 mi / 4h 13m, 11 checkpoints each with ETA + weather + risk + reasons,
-  recommended_index 0 with reason string, `assumptions` + `notes` present.
-- `POST /api/heatmap` (60 corridor points, +6h) → HTTP 200, 60 points with
-  intensity/level/wind/rain/snow. `GET /api/geocode` → 200. Bad payloads → clean 400s.
-- Risk-rule unit checks: all 10 boundary/load-rule cases pass
-  (e.g. 40 mph + 45,000 lb → severe; 50 mph + 31,000 lb → no_travel; rain 1.5 in/hr → no_travel).
+- End-to-end `POST /api/plan` Dallas, TX → Houston, TX (departure next day
+  08:00 CDT, 40,000 lb, 25-mi spacing) → HTTP 200, 1 route (OSRM returned 1; noted),
+  238.3 mi / 4h 13m, 11 checkpoints each with ETA + weather + risk + reasons,
+  recommended_index 0 with reason string, 4 `assumptions` + `notes` present.
+- Los Angeles → San Francisco → HTTP 200, 2 routes (OSRM returned 2; noted);
+  recommendation picks Route 1 on the risk tie (shorter time).
+- `POST /api/heatmap` (60 corridor points, +0h/+24h/+48h) → HTTP 200, 60 points each
+  with intensity/level/wind/rain/snow. `GET /api/geocode` → 200. Bad payloads → clean 400s.
+- Risk-rule boundary checks (run against `routes/services.py`): 16 cases pass,
+  incl. wind/rain/snow band edges and load rules (e.g. 40 mph + 45,000 lb → severe;
+  50 mph + 31,000 lb → no_travel; rain 1.5 in/hr → no_travel).

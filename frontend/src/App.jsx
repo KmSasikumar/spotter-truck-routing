@@ -289,7 +289,7 @@ export default function App() {
           </div>
         </>
       )}
-      <footer>Routes: OSRM · Weather: Open-Meteo · Geocoding: Nominatim (all free, no keys).</footer>
+      <footer>Routes: OSRM · Weather: National Weather Service (Open-Meteo fallback) · Geocoding: Nominatim (all free, no keys).</footer>
     </div>
   );
 }

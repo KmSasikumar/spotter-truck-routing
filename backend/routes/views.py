@@ -427,6 +427,9 @@ def plan(request):
                 "Checkpoint ETA = departure + (miles_along / route_miles) × route duration "
                 "(uniform average speed along the route).",
                 "Each segment between checkpoints takes its starting checkpoint's risk level.",
+                "The forecast hour nearest each checkpoint ETA is used; ETAs beyond the "
+                "forecast window clamp to the nearest available hour.",
+                "Weather is sampled at exact spacing intervals plus the destination point.",
             ],
         }
     )
