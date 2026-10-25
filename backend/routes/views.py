@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -25,6 +26,8 @@ REQ_TIMEOUT = 30
 OSRM_URL = "https://router.project-osrm.org/route/v1/driving/{coords}"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 OPENMETEO_URL = "https://api.open-meteo.com/v1/forecast"
+NWS_POINTS_URL = "https://api.weather.gov/points/{lat},{lon}"
+NWS_GRID_URL = "https://api.weather.gov/gridpoints/{grid}/{x},{y}"
 
 
 def _err(message: str, status: int = 400):
@@ -69,6 +72,115 @@ def _osrm_routes(o_lat, o_lon, d_lat, d_lon):
     if data.get("code") != "Ok":
         raise RuntimeError(f"OSRM error: {data.get('code')}")
     return data.get("routes", [])
+
+
+# --- National Weather Service (primary weather source) ---
+# Free, no key, US-only — which fits this US trucking app. The gridpoint
+# API gives wind (km/h), quantitative precipitation (mm over an interval)
+# and snowfall (mm over an interval) as time series. Those are expanded
+# to hourly rates in the same shape Open-Meteo returns, so the existing
+# risk classification is unchanged.
+_NWS_POINT_CACHE: dict = {}
+_NWS_GRID_CACHE: dict = {}
+
+
+def _parse_valid_time(valid_time: str):
+    """'2026-10-25T05:00:00+00:00/PT6H' -> (start_utc_datetime, hours)."""
+    start_s, _, dur_s = valid_time.partition("/")
+    start = datetime.fromisoformat(start_s)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    start = start.astimezone(timezone.utc)
+    m = re.fullmatch(r"PT(?:(\d+)H)?(?:(\d+)M)?", dur_s or "")
+    hours = int(m.group(1) or 0) if m else 0
+    minutes = int(m.group(2) or 0) if m else 0
+    total = hours + minutes / 60.0
+    return start, (total if total > 0 else 1.0)
+
+
+def _expand_series(values, *, per_hour_total: bool, convert):
+    """Expand NWS interval values to {utc_hour_string: value}.
+
+    per_hour_total=True: the value is a total over the interval, so it
+    is divided by the interval length to get a per-hour rate.
+    per_hour_total=False: the value is already a rate/reading, repeated
+    for each hour in the interval.
+    """
+    out: dict = {}
+    for entry in values or []:
+        value = entry.get("value")
+        if value is None:
+            continue
+        start, hours = _parse_valid_time(entry["validTime"])
+        rate = convert(value / hours) if per_hour_total else convert(value)
+        n = max(1, int(round(hours)))
+        for i in range(n):
+            out[(start + timedelta(hours=i)).strftime("%Y-%m-%dT%H:00")] = rate
+    return out
+
+
+def _nws_hourly(lat: float, lon: float):
+    """One point's hourly weather from NWS, in Open-Meteo's shape."""
+    key = (f"{lat:.5f}", f"{lon:.5f}")
+    point = _NWS_POINT_CACHE.get(key)
+    if point is None:
+        resp = requests.get(
+            NWS_POINTS_URL.format(lat=f"{lat:.4f}", lon=f"{lon:.4f}"),
+            headers=UA,
+            timeout=REQ_TIMEOUT,
+        )
+        resp.raise_for_status()
+        props = resp.json()["properties"]
+        point = (props["gridId"], props["gridX"], props["gridY"])
+        _NWS_POINT_CACHE[key] = point
+    grid, x, y = point
+    cached = _NWS_GRID_CACHE.get(point)
+    if cached and time.monotonic() - cached[0] < _FORECAST_TTL_S:
+        props = cached[1]
+    else:
+        resp = requests.get(
+            NWS_GRID_URL.format(grid=grid, x=x, y=y), headers=UA, timeout=REQ_TIMEOUT
+        )
+        resp.raise_for_status()
+        props = resp.json()["properties"]
+        _NWS_GRID_CACHE[point] = (time.monotonic(), props)
+    wind = _expand_series(
+        props.get("windSpeed", {}).get("values"),
+        per_hour_total=False,
+        convert=lambda v: v * 0.621371,  # km/h -> mph
+    )
+    rain = _expand_series(
+        props.get("quantitativePrecipitation", {}).get("values"),
+        per_hour_total=True,
+        convert=lambda v: v / 25.4,  # mm/hr -> in/hr
+    )
+    snow = _expand_series(
+        props.get("snowfallAmount", {}).get("values"),
+        per_hour_total=True,
+        convert=lambda v: v / 10.0,  # mm/hr -> cm/hr (matches _weather_at)
+    )
+    times = sorted(wind.keys())
+    return {
+        "time": times,
+        "wind_speed_10m": [wind.get(t, 0.0) for t in times],
+        "precipitation": [rain.get(t, 0.0) for t in times],
+        "snowfall": [snow.get(t, 0.0) for t in times],
+    }
+
+
+def _forecast(lats, lons, start_date=None, end_date=None):
+    """Weather for a batch of points.
+
+    Primary source is now the National Weather Service, because
+    Open-Meteo kept returning 429 from the deployed backend's IP even
+    after the request was shrunk to the departure window. Open-Meteo
+    remains only as a fallback if NWS fails for a point (for example
+    a non-US location, where NWS has no grid).
+    """
+    try:
+        return [_nws_hourly(lat, lon) for lat, lon in zip(lats, lons)]
+    except Exception:
+        return _openmeteo_forecast(lats, lons, start_date, end_date)
 
 
 # Small in-process cache: a repeated plan (same points + window) should
@@ -279,7 +391,7 @@ def plan(request):
         # Open-Meteo forecast for all of them in a single request.
         positions = _checkpoint_positions(geometry, spacing)
         try:
-            forecasts = _openmeteo_forecast(
+            forecasts = _forecast(
                 [p[0] for p in positions],
                 [p[1] for p in positions],
                 start_date=(departure - timedelta(days=1)).date().isoformat(),
@@ -371,7 +483,7 @@ def heatmap(request):
 
     when = departure + timedelta(hours=hour_offset)
     try:
-        forecasts = _openmeteo_forecast(
+        forecasts = _forecast(
             [float(p[0]) for p in points],
             [float(p[1]) for p in points],
             start_date=(when - timedelta(days=1)).date().isoformat(),
